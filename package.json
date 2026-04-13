@@ -1,7 +1,7 @@
 {
   "name": "sc-stremio-addon",
-  "version": "1.5.0",
-  "description": "Stremio addon for StreamingCommunity with VixCloud support",
+  "version": "1.6.0",
+  "description": "Stremio addon for StreamingCommunity (VixCloud) with FlareSolverr support",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
