@@ -7,7 +7,7 @@ const axios = require('axios');
 // L'addon si aggiorna da solo entro 6 ore
 
 let SC_DOMAIN = 'https://streamingcommunityz.pet';
-const LISTA_URL = 'https://raw.githubusercontent.com/TUO_USERNAME/sc-addon-stremio/main/domini.txt';
+const LISTA_URL = 'https://raw.githubusercontent.com/susajenny747-hue/sc-addon-stremio/main/domini.txt';
 
 async function aggiornaDominio() {
   try {
