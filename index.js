@@ -14,6 +14,8 @@ const api = axios.create({
     validateStatus: (s) => s < 500 
 });
 
+const slugify = (s) => s ? s.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+
 async function refreshSession() {
     console.log(`[📡] Sincronizzazione sessione (FlareSolverr)...`);
     try {
@@ -39,25 +41,31 @@ async function callInternalApi(url) {
             'X-Inertia-Version': SESSION.inertia,
             'X-Requested-With': 'XMLHttpRequest',
             'Accept': 'application/json',
-            'Referer': SC_DOMAIN + '/'
+            'Referer': SC_DOMAIN + '/',
+            'Origin': SC_DOMAIN
         }
     });
 
-    // Se il sito risponde con un redirect (Inertia-Location), seguiamo il redirect manualmente
-    if (res.status === 409 || res.headers['x-inertia-location']) {
-        const nextUrl = res.headers['x-inertia-location'] || url;
-        console.log(`[🔄] Gestione Redirect/Version Mismatch verso: ${nextUrl}`);
-        if (res.headers['x-inertia-version']) SESSION.inertia = res.headers['x-inertia-version'];
+    // Se troviamo un redirect forzato (X-Inertia-Location), lo seguiamo
+    if (res.headers['x-inertia-location']) {
+        const nextUrl = res.headers['x-inertia-location'];
+        console.log(`[🔄] Seguendo Redirect forzato: ${nextUrl}`);
         return callInternalApi(nextUrl);
+    }
+
+    // Se la versione è cambiata (409 Conflict)
+    if (res.status === 409) {
+        SESSION.inertia = res.headers['x-inertia-version'] || SESSION.inertia;
+        return callInternalApi(url);
     }
     
     return res.data;
 }
 
 const builder = new addonBuilder({
-    id: 'org.meezie.v12',
-    version: '12.0.0',
-    name: 'Meezie V12 Redirect-Fix',
+    id: 'org.meezie.v12.5',
+    version: '12.5.0',
+    name: 'Meezie Guardian',
     resources: ['stream'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -77,12 +85,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
         console.log(`[🔎] Ricerca: ${title}`);
         const searchRes = await callInternalApi(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`);
         
-        // Estrazione dati flessibile per bypassare il redirect
+        // Estrazione dati sicura
         const results = searchRes.props?.titles?.data || searchRes.props?.titles || [];
-        const match = results.find(r => 
-            r.name?.toLowerCase().includes(title.toLowerCase()) || 
-            title.toLowerCase().includes(r.name?.toLowerCase())
-        );
+        const match = Array.isArray(results) ? results.find(r => slugify(r.name || r.title).includes(slugify(title))) : null;
 
         if (match) {
             let watchUrl = `${SC_DOMAIN}/it/watch/${match.id}`;
@@ -104,7 +109,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 if (token) {
                     const stream = {
                         url: `https://vixcloud.co/playlist/${vixId}?token=${token}&expires=${expires}&h=1`,
-                        title: `Meezie V12 🚀 Vix-Master`
+                        title: `Meezie 🚀 Guardian VIX`
                     };
                     CACHE.set(id, stream);
                     console.log(`[🚀] STREAM PRONTO!`);
