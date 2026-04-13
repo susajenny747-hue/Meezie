@@ -4,6 +4,8 @@
   "description": "Stremio addon for HTTP stream resolution",
   "main": "index.js",
   "type": "commonjs",
+  "private": true,
+  "license": "UNLICENSED",
   "engines": {
     "node": ">=20 <21"
   },
