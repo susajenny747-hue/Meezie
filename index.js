@@ -20,60 +20,60 @@ async function refreshSession() {
 
         const response = await axios.post(`${FLARESOLVERR_URL}/v1`, {
             cmd: 'request.get', url: `${SC_DOMAIN}/it`, maxTimeout: 60000
-        });
+        }, { timeout: 100000 });
 
         if (response.data.status === 'ok') {
             SC_COOKIES = response.data.solution.cookies.map(c => `${c.name}=${c.value}`).join('; ');
             SC_USERAGENT = response.data.solution.userAgent;
-            const versionMatch = response.data.solution.response.match(/"version"\s*:\s*"([^"]+)"/) || response.data.solution.response.match(/version&quot;:&quot;([^&]+)&quot;/);
+            const html = response.data.solution.response;
+            const versionMatch = html.match(/"version"\s*:\s*"([^"]+)"/) || html.match(/version&quot;:&quot;([^&]+)&quot;/);
             if (versionMatch) SC_VERSION = versionMatch[1];
-            console.log(`[✅] Sessione OK. Dominio: ${SC_DOMAIN} | Versione: ${SC_VERSION}`);
+            console.log(`[✅] Sessione OK. Versione: ${SC_VERSION}`);
         }
-    } catch (e) { console.error('[❌] Errore Sessione'); }
+    } catch (e) { console.error('[❌] Errore Sessione:', e.message); }
 }
 
 async function searchSC(query) {
     const q = cleanTitle(query);
     const headers = { 'User-Agent': SC_USERAGENT, 'Cookie': SC_COOKIES, 'X-Inertia': 'true', 'X-Inertia-Version': SC_VERSION, 'Accept': 'application/json' };
     try {
-        const { data } = await axios.get(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(q)}`, { headers });
+        const { data } = await axios.get(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(q)}`, { headers, timeout: 15000 });
         return data?.props?.titles?.data || data?.props?.data || [];
     } catch (e) { return []; }
 }
 
 async function getVixStream(scId, episodeId = null) {
     try {
-        // Costruiamo l'URL watch come nell'esempio: /watch/305?e=5608
         const watchUrl = episodeId ? `${SC_DOMAIN}/it/watch/${scId}?e=${episodeId}` : `${SC_DOMAIN}/it/watch/${scId}`;
-        
         const { data: watchPage } = await axios.get(watchUrl, {
             headers: { 'User-Agent': SC_USERAGENT, 'Cookie': SC_COOKIES, 'X-Inertia': 'true', 'X-Inertia-Version': SC_VERSION }
         });
-
         const embedUrl = watchPage.props.embedUrl;
         if (!embedUrl) return null;
-
         const { data: embedHtml } = await axios.get(embedUrl, { headers: { 'User-Agent': SC_USERAGENT, 'Referer': SC_DOMAIN } });
         const token = embedHtml.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
         const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
-
         if (token && expires) {
             return `https://vixcloud.co/playlist/${embedUrl.split('/').pop()}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
         }
     } catch (e) { return null; }
 }
 
+// --- FIX MANIFEST ---
 const builder = new addonBuilder({
-    id: 'org.meezie.sc.final',
-    version: '2.3.0',
-    name: 'Meezie SC (The Boys Fix)',
+    id: 'org.meezie.sc.ultra.final',
+    version: '2.3.1',
+    name: 'Meezie SC Ultra',
+    description: 'StreamingCommunity con fix The Boys',
     resources: ['stream'],
     types: ['movie', 'series'],
-    idPrefixes: ['tt']
+    idPrefixes: ['tt'],
+    catalogs: [] // Array vuoto obbligatorio
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
     const [imdbId, season, episode] = id.split(':');
+    console.log(`[🔎] Richiesta: ${id}`);
     try {
         const tmdbUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`;
         const tmdbRes = await axios.get(tmdbUrl);
@@ -81,7 +81,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
         if (!info) return { streams: [] };
 
         const results = await searchSC(info.title || info.name);
-        if (results.length === 0) return { streams: [] };
+        if (!results.length) return { streams: [] };
 
         const match = results[0];
         let streamUrl = null;
@@ -89,25 +89,19 @@ builder.defineStreamHandler(async ({ type, id }) => {
         if (type === 'movie') {
             streamUrl = await getVixStream(match.id);
         } else {
-            // Per le serie, carichiamo la pagina delle stagioni per trovare l'ID episodio specifico (parametro 'e')
             const seasonUrl = `${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`;
             const { data: seasonData } = await axios.get(seasonUrl, {
                 headers: { 'User-Agent': SC_USERAGENT, 'Cookie': SC_COOKIES, 'X-Inertia': 'true', 'X-Inertia-Version': SC_VERSION }
             });
-
             const epData = seasonData.props.loadedSeason.episodes.find(e => String(e.number) === String(episode));
-            if (epData) {
-                // epData.id è il parametro 'e' (es. 5608), match.id è l'ID serie (es. 305)
-                streamUrl = await getVixStream(match.id, epData.id);
-            }
+            if (epData) streamUrl = await getVixStream(match.id, epData.id);
         }
 
-        return {
-            streams: streamUrl ? [{ url: streamUrl, title: `SC 🚀 1080p\n(VixCloud)` }] : []
-        };
+        return { streams: streamUrl ? [{ url: streamUrl, title: `SC 🚀 1080p` }] : [] };
     } catch (e) { return { streams: [] }; }
 });
 
-serveHTTP(builder.getInterface(), { port: process.env.PORT || 10000 });
+const PORT = process.env.PORT || 10000;
+serveHTTP(builder.getInterface(), { port: PORT });
 refreshSession();
 setInterval(refreshSession, 1000 * 60 * 30);
