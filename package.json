@@ -1,21 +1,18 @@
 {
   "name": "sc-stremio-addon",
-  "version": "1.5.2",
-  "description": "Stremio addon for HTTP stream resolution",
+  "version": "1.5.0",
+  "description": "Stremio addon for StreamingCommunity with VixCloud support",
   "main": "index.js",
-  "type": "commonjs",
-  "private": true,
-  "license": "UNLICENSED",
-  "engines": {
-    "node": ">=20 <21"
-  },
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.6.8",
-    "dotenv": "^16.4.5",
-    "stremio-addon-sdk": "^1.6.10"
-  }
+    "stremio-addon-sdk": "^3.0.0",
+    "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Meezie",
+  "license": "MIT"
 }
