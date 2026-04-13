@@ -1,308 +1,114 @@
-require('dotenv').config();
-
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 
 const TMDB_KEY = process.env.TMDB_KEY || '';
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'https://flaresolverr-production-b7ab.up.railway.app';
-const LISTA_URL = 'https://raw.githubusercontent.com/susajenny747-hue/Meezie/main/domini.txt';
 
 let SC_DOMAIN = 'https://streamingcommunityz.moe';
-let BROWSER = { ua: '', cookies: '', inertia: '' };
-const CACHE = new Map();
+let SESSION = { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0 Safari/537.36', cookies: '', inertia: '' };
 
-const api = axios.create({
-  timeout: 20000,
-  maxRedirects: 0,
-  validateStatus: () => true
-});
+const api = axios.create({ timeout: 10000 });
 
-const slugify = (s) => (s ? s.toLowerCase().replace(/[^a-z0-9]/g, '') : '');
-
-function getCache(key) {
-  const hit = CACHE.get(key);
-  if (!hit) return null;
-  if (Date.now() > hit.expiresAt) {
-    CACHE.delete(key);
-    return null;
-  }
-  return hit.value;
+// Recupera le chiavi d'accesso iniziali (Cloudflare Bypass)
+async function refreshSession() {
+    try {
+        const res = await axios.post(`${FLARESOLVERR_URL}/v1`, {
+            cmd: 'request.get', url: SC_DOMAIN, maxTimeout: 60000
+        });
+        if (res.data.status === 'ok') {
+            SESSION.cookies = res.data.solution.cookies.map(c => `${c.name}=${c.value}`).join('; ');
+            SESSION.ua = res.data.solution.userAgent;
+            const m = res.data.solution.response.match(/version&quot;:&quot;([^&]+)&quot;/);
+            if (m) SESSION.inertia = m[1];
+            console.log(`[📡] Sessione Webstreamr-Style Attiva. Inertia: ${SESSION.inertia}`);
+        }
+    } catch (e) { console.error(`[❌] Errore Sessione`); }
 }
 
-function setCache(key, value, ttlMs) {
-  CACHE.set(key, { value, expiresAt: Date.now() + ttlMs });
-}
+// Chiamata API "Pura" (Simula il caricamento dati interno)
+async function callInternalApi(url) {
+    const res = await api.get(url, {
+        headers: {
+            'User-Agent': SESSION.ua,
+            'Cookie': SESSION.cookies,
+            'X-Inertia': 'true',
+            'X-Inertia-Version': SESSION.inertia,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json'
+        },
+        validateStatus: (s) => s < 500
+    });
 
-function absoluteUrl(u) {
-  if (!u) return '';
-  if (/^https?:\/\//i.test(u)) return u;
-  return new URL(u, SC_DOMAIN).toString();
-}
-
-async function syncBrowser() {
-  console.log('[📡] Sincronizzazione sessione...');
-  try {
-    const res = await axios.post(`${FLARESOLVERR_URL}/v1`, {
-      cmd: 'request.get',
-      url: SC_DOMAIN,
-      maxTimeout: 60000
-    }, { timeout: 70000 });
-
-    if (res.data?.status === 'ok') {
-      BROWSER.cookies = (res.data.solution.cookies || [])
-        .map(c => `${c.name}=${c.value}`)
-        .join('; ');
-      BROWSER.ua = res.data.solution.userAgent || 'Mozilla/5.0';
-
-      const html = res.data.solution.response || '';
-      const versionMatch = html.match(/version&quot;:&quot;([^&]+)&quot;/);
-      if (versionMatch) BROWSER.inertia = versionMatch[1];
-
-      console.log(`[✅] Sessione Pronta (V: ${BROWSER.inertia || 'n/d'})`);
-      return true;
+    if (res.status === 409) {
+        SESSION.inertia = res.headers['x-inertia-version'] || SESSION.inertia;
+        return callInternalApi(url); // Retry istantaneo con nuova versione
     }
-  } catch (e) {
-    console.error(`[❌] Errore FlareSolverr: ${e.message}`);
-  }
-  return false;
-}
-
-function buildHeaders(isInertia = true, referer = `${SC_DOMAIN}/`) {
-  const headers = {
-    'User-Agent': BROWSER.ua || 'Mozilla/5.0',
-    'Cookie': BROWSER.cookies || '',
-    'Referer': referer,
-    'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7'
-  };
-
-  if (isInertia) {
-    headers['X-Inertia'] = 'true';
-    headers['X-Requested-With'] = 'XMLHttpRequest';
-    headers['Accept'] = 'application/json, text/plain, */*';
-    if (BROWSER.inertia) headers['X-Inertia-Version'] = BROWSER.inertia;
-  } else {
-    headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
-  }
-
-  return headers;
-}
-
-async function requestAny(url, mode = 'inertia', depth = 0) {
-  if (depth > 4) throw new Error(`Troppi redirect/retry su ${url}`);
-
-  const res = await api.get(url, {
-    responseType: 'text',
-    transformResponse: [d => d],
-    headers: buildHeaders(mode === 'inertia', `${SC_DOMAIN}/`)
-  });
-
-  if (res.status >= 300 && res.status < 400 && res.headers.location) {
-    return requestAny(absoluteUrl(res.headers.location), mode, depth + 1);
-  }
-
-  if (res.status === 409) {
-    const loc = res.headers['x-inertia-location'] || res.headers['X-Inertia-Location'];
-    const ver = res.headers['x-inertia-version'] || res.headers['X-Inertia-Version'];
-
-    if (ver) BROWSER.inertia = ver;
-
-    if (loc) {
-      console.log(`[↪️] Redirect Inertia verso: ${loc}`);
-      return requestAny(absoluteUrl(loc), 'html', depth + 1);
-    }
-
-    await syncBrowser();
-    return requestAny(url, 'html', depth + 1);
-  }
-
-  if (res.status < 200 || res.status >= 300) {
-    throw new Error(`SC ${res.status} su ${url}`);
-  }
-
-  return res.data;
-}
-
-function parseMaybeJson(text) {
-  if (typeof text !== 'string') return text;
-  const t = text.trim();
-  if (!t) return null;
-  if (t.startsWith('{') || t.startsWith('[')) {
-    try { return JSON.parse(t); } catch { return null; }
-  }
-  return null;
-}
-
-function extractEmbedUrlFromHtml(html) {
-  if (!html) return null;
-
-  const patterns = [
-    /"embedUrl"\s*:\s*"([^"]+)"/,
-    /embedUrl&quot;:&quot;([^&]+)&quot;/,
-    /data-embed-url="([^"]+)"/,
-    /data-embed-url='([^']+)'/,
-    /src="(https?:\/\/[^"]*vix[^"]*)"/i,
-    /src="(https?:\/\/[^"]*embed[^"]*)"/i
-  ];
-
-  for (const p of patterns) {
-    const m = html.match(p);
-    if (m?.[1]) return m[1].replace(/\\\//g, '/').replace(/&amp;/g, '&');
-  }
-  return null;
-}
-
-async function fetchSCJson(url) {
-  const body = await requestAny(url, 'inertia');
-  return parseMaybeJson(body);
-}
-
-async function fetchSCHtml(url) {
-  const body = await requestAny(url, 'html');
-  return typeof body === 'string' ? body : JSON.stringify(body);
-}
-
-async function searchTitleOnSC(title) {
-  const searchUrl = `${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`;
-
-  const json = await fetchSCJson(searchUrl);
-  if (json) {
-    const results = json?.props?.titles?.data || json?.props?.titles || [];
-    if (Array.isArray(results) && results.length) return results;
-  }
-
-  const html = await fetchSCHtml(searchUrl);
-  const matches = [...html.matchAll(/\/it\/titles\/(\d+)-([^"'\/\s<]+)/g)]
-    .map(m => ({ id: m[1], slug: m[2], name: m[2].replace(/-/g, ' ') }));
-
-  return matches;
-}
-
-async function getWatchUrl(match, type, season, episode) {
-  if (type === 'series' && season && episode) {
-    const seasonJson = await fetchSCJson(`${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`);
-    const epObj = seasonJson?.props?.loadedSeason?.episodes?.find(e => String(e.number) === String(episode));
-    if (epObj) return `${SC_DOMAIN}/it/watch/${match.id}?e=${epObj.id}`;
-  }
-  return `${SC_DOMAIN}/it/watch/${match.id}`;
+    return res.data;
 }
 
 const builder = new addonBuilder({
-  id: 'org.meezie.pro.v10',
-  version: '10.0.4',
-  name: 'Meezie Pro SC',
-  description: 'Addon Stremio per stream HTTP',
-  resources: ['stream'],
-  types: ['movie', 'series'],
-  idPrefixes: ['tt'],
-  catalogs: []
+    id: 'org.meezie.webstreamr',
+    version: '11.0.0',
+    name: 'Meezie Webstreamr-Engine',
+    resources: ['stream'],
+    types: ['movie', 'series'],
+    idPrefixes: ['tt'],
+    catalogs: []
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
-  const cached = getCache(id);
-  if (cached) {
-    return { streams: [cached], cacheMaxAge: 60 };
-  }
-
-  const [imdbId, season, episode] = String(id).split(':');
-
-  try {
-    if (!TMDB_KEY) {
-      console.error('[❌] TMDB_KEY mancante');
-      return { streams: [] };
-    }
-
-    const tmdb = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}`, {
-      params: {
-        api_key: TMDB_KEY,
-        external_source: 'imdb_id',
-        language: 'it-IT'
-      },
-      timeout: 15000
-    });
-
-    const item = tmdb.data?.movie_results?.[0] || tmdb.data?.tv_results?.[0];
-    if (!item) return { streams: [] };
-
-    const title = item.title || item.name;
-    const results = await searchTitleOnSC(title);
-    if (!results.length) return { streams: [] };
-
-    const wanted = slugify(title);
-    const match = results.find(r => {
-      const name = slugify(r.name || r.title || r.slug || '');
-      return name === wanted || name.includes(wanted) || wanted.includes(name);
-    }) || results[0];
-
-    const watchUrl = await getWatchUrl(match, type, season, episode);
-
-    let embedUrl = null;
-
+    const [imdbId, season, episode] = id.split(':');
+    
     try {
-      const pageJson = await fetchSCJson(watchUrl);
-      embedUrl = pageJson?.props?.embedUrl || null;
-    } catch (e) {
-      console.log(`[⚠️] Watch JSON fallita: ${e.message}`);
-    }
+        // 1. Risoluzione Titolo
+        const tmdb = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`);
+        const item = tmdb.data.movie_results?.[0] || tmdb.data.tv_results?.[0];
+        if (!item) return { streams: [] };
+        const title = item.title || item.name;
 
-    if (!embedUrl) {
-      const watchHtml = await fetchSCHtml(watchUrl);
-      embedUrl = extractEmbedUrlFromHtml(watchHtml);
-    }
+        // 2. Ricerca API (molto più veloce del browsing)
+        const search = await callInternalApi(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`);
+        const results = search.props?.titles?.data || [];
+        const match = results.find(r => r.name.toLowerCase().includes(title.toLowerCase()) || title.toLowerCase().includes(r.name.toLowerCase()));
 
-    if (!embedUrl) return { streams: [] };
+        if (match) {
+            let targetUrl = `${SC_DOMAIN}/it/watch/${match.id}`;
+            
+            // 3. Se è una serie, otteniamo l'ID episodio specifico
+            if (type === 'series') {
+                const sData = await callInternalApi(`${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`);
+                const ep = sData.props.loadedSeason.episodes.find(e => String(e.number) === String(episode));
+                if (ep) targetUrl += `?e=${ep.id}`;
+            }
 
-    const embedRes = await axios.get(embedUrl, {
-      timeout: 15000,
-      responseType: 'text',
-      transformResponse: [d => d],
-      headers: {
-        'User-Agent': BROWSER.ua || 'Mozilla/5.0'
-      }
-    });
+            // 4. Estrazione Master Playlist (vixcloud)
+            const watchData = await callInternalApi(targetUrl);
+            const embedUrl = watchData.props?.embedUrl;
 
-    const html = embedRes.data || '';
-    const token = html.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
-    const expires = html.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
-    const vixId = embedUrl.split('/').filter(Boolean).pop();
+            if (embedUrl) {
+                const { data: embedHtml } = await axios.get(embedUrl, { headers: { 'User-Agent': SESSION.ua } });
+                const token = embedHtml.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
+                const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
+                const vixId = embedUrl.split('/').pop();
 
-    if (!token || !expires || !vixId) return { streams: [] };
-
-    const stream = {
-      url: `https://vixcloud.co/playlist/${vixId}?token=${token}&expires=${expires}&h=1`,
-      title: 'Meezie 🚀 Vix-Master'
-    };
-
-    const ttl = Math.max(60000, (Number(expires) * 1000) - Date.now() - 30000);
-    setCache(id, stream, ttl);
-
-    return {
-      streams: [stream],
-      cacheMaxAge: 60,
-      staleRevalidate: 120,
-      staleError: 300
-    };
-  } catch (e) {
-    console.error(`[💀] Errore stream handler: ${e.message}`);
+                if (token && expires) {
+                    // Restituiamo il formato Master Playlist che hai indicato
+                    return { streams: [{
+                        url: `https://vixcloud.co/playlist/${vixId}?token=${token}&expires=${expires}&h=1`,
+                        title: `WEBSTREAMR-MODE 🚀 Multi-Res`,
+                        behaviorHints: { notWebReady: true }
+                    }]};
+                }
+            }
+        }
+    } catch (e) { console.error(`[💀] Crash: ${e.message}`); }
     return { streams: [] };
-  }
 });
 
 const PORT = process.env.PORT || 10000;
 serveHTTP(builder.getInterface(), { port: PORT });
 
 (async () => {
-  try {
-    const { data } = await axios.get(LISTA_URL, { timeout: 10000 });
-    const live = String(data)
-      .split('\n')
-      .map(x => x.trim())
-      .find(l => l && l.includes('streamingcommunity'));
-    if (live) SC_DOMAIN = live.replace(/\/$/, '');
-  } catch (e) {
-    console.error(`[⚠️] domini.txt non letto: ${e.message}`);
-  }
-
-  console.log(`[🌐] Target: ${SC_DOMAIN}`);
-  await syncBrowser();
-  setInterval(syncBrowser, 25 * 60 * 1000);
+    await refreshSession();
+    setInterval(refreshSession, 20 * 60 * 1000);
 })();
