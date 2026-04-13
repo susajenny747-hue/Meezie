@@ -6,72 +6,48 @@ const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'https://flaresolverr-p
 const LISTA_URL = 'https://raw.githubusercontent.com/susajenny747-hue/Meezie/main/domini.txt';
 
 let SC_DOMAIN = 'https://streamingcommunityz.moe';
-let BROWSER_DATA = {
-    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    cookies: '',
-    inertiaVersion: ''
-};
+let BROWSER_DATA = { ua: '', cookies: '', inertia: '' };
+const CACHE = new Map(); // Per rendere i link istantanei al secondo click
 
-// Configura un'istanza axios che "sembra" un browser vero
-const browser = axios.create({
-    timeout: 15000,
-    validateStatus: false
-});
+const api = axios.create({ timeout: 10000, validateStatus: false });
 
-async function updateBrowserPersona() {
-    console.log(`[🎭] Aggiorno l'identità browser via FlareSolverr...`);
+async function getBrowserData() {
+    console.log(`[🎭] Recupero chiavi d'accesso (FlareSolverr)...`);
     try {
         const res = await axios.post(`${FLARESOLVERR_URL}/v1`, {
-            cmd: 'request.get',
-            url: SC_DOMAIN,
-            maxTimeout: 60000
+            cmd: 'request.get', url: SC_DOMAIN, maxTimeout: 60000
         });
-
         if (res.data.status === 'ok') {
             BROWSER_DATA.cookies = res.data.solution.cookies.map(c => `${c.name}=${c.value}`).join('; ');
             BROWSER_DATA.ua = res.data.solution.userAgent;
-            
-            // Estrazione chirurgica della versione Inertia
-            const html = res.data.solution.response;
-            const versionMatch = html.match(/version&quot;:&quot;([^&]+)&quot;/);
-            if (versionMatch) {
-                BROWSER_DATA.inertiaVersion = versionMatch[1];
-                console.log(`[✅] Identità pronta! Versione Inertia: ${BROWSER_DATA.inertiaVersion}`);
-            }
+            const m = res.data.solution.response.match(/version&quot;:&quot;([^&]+)&quot;/);
+            if (m) BROWSER_DATA.inertia = m[1];
+            console.log(`[✅] Chiavi ottenute! Versione: ${BROWSER_DATA.inertia}`);
         }
-    } catch (e) {
-        console.error(`[❌] Impossibile ottenere identità browser: ${e.message}`);
-    }
+    } catch (e) { console.error(`[❌] Errore FlareSolverr: ${e.message}`); }
 }
 
-async function getJson(url) {
-    const res = await browser.get(url, {
+async function scRequest(url) {
+    const res = await api.get(url, {
         headers: {
             'User-Agent': BROWSER_DATA.ua,
             'Cookie': BROWSER_DATA.cookies,
             'X-Inertia': 'true',
-            'X-Inertia-Version': BROWSER_DATA.inertiaVersion,
-            'X-Requested-With': 'XMLHttpRequest',
-            'Accept': 'application/json, text/plain, */*',
+            'X-Inertia-Version': BROWSER_DATA.inertia,
             'Referer': SC_DOMAIN + '/'
         }
     });
-
-    // Se Cloudflare ci ha bloccato o la versione è scaduta (409), proviamo a recuperare la nuova versione dagli header
-    if (res.status === 409) {
-        const newV = res.headers['x-inertia-version'];
-        if (newV) {
-            BROWSER_DATA.inertiaVersion = newV;
-            return getJson(url); // Riprova istantaneamente
-        }
+    if (res.status === 409 && res.headers['x-inertia-version']) {
+        BROWSER_DATA.inertia = res.headers['x-inertia-version'];
+        return scRequest(url);
     }
     return res.data;
 }
 
 const builder = new addonBuilder({
-    id: 'org.meezie.veezie.style',
-    version: '7.0.0',
-    name: 'Meezie Browser-Mode',
+    id: 'org.meezie.v8',
+    version: '8.0.0',
+    name: 'Meezie SC V8',
     resources: ['stream'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -79,59 +55,69 @@ const builder = new addonBuilder({
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
+    if (CACHE.has(id)) {
+        console.log(`[⚡] Link servito da Cache per: ${id}`);
+        return { streams: [CACHE.get(id)] };
+    }
+
+    console.log(`[🔎] Avvio ricerca per: ${id}`);
     const [imdbId, season, episode] = id.split(':');
-    console.log(`[🔎] Ricerca per: ${imdbId}`);
 
     try {
-        // Step 1: TMDB per il titolo italiano
-        const { data: tmdb } = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`);
-        const item = tmdb.movie_results?.[0] || tmdb.tv_results?.[0];
+        // 1. Titolo da TMDB
+        const tmdbRes = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`);
+        const item = tmdbRes.data.movie_results?.[0] || tmdbRes.data.tv_results?.[0];
         if (!item) return { streams: [] };
-
         const title = item.title || item.name;
-        
-        // Step 2: Ricerca JSON (come fa l'app di SC o Veezie)
-        const searchData = await getJson(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`);
-        const match = searchData.props?.titles?.data?.[0] || searchData.props?.data?.[0];
+        console.log(`[🎬] Titolo TMDB: ${title}`);
 
-        if (match) {
-            // Step 3: Ottieni l'embed URL
-            const watchUrl = type === 'movie' ? 
-                `${SC_DOMAIN}/it/watch/${match.id}` : 
-                `${SC_DOMAIN}/it/watch/${match.id}?e=${episode}`;
-            
-            const pageData = await getJson(watchUrl);
-            const embedUrl = pageData.props?.embedUrl;
+        // 2. Ricerca su SC
+        const searchRes = await scRequest(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`);
+        const match = searchRes.props?.titles?.data?.[0] || searchRes.props?.data?.[0];
+        if (!match) { console.log(`[⚠️] Nessun match su SC`); return { streams: [] }; }
+        console.log(`[✅] Trovato su SC: ${match.slug} (ID: ${match.id})`);
 
-            if (embedUrl) {
-                // Step 4: Estrazione Token VixCloud
-                const { data: embedHtml } = await axios.get(embedUrl, { headers: { 'User-Agent': BROWSER_DATA.ua } });
-                const token = embedHtml.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
-                const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
-                
-                if (token) {
-                    const finalUrl = `https://vixcloud.co/playlist/${embedUrl.split('/').pop()}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
-                    console.log(`[🚀] Link catturato!`);
-                    return { streams: [{ url: finalUrl, title: `SC BROWSER-MODE 1080p` }] };
-                }
-            }
+        // 3. Pagina Watch / Episodio
+        let watchUrl = `${SC_DOMAIN}/it/watch/${match.id}`;
+        if (type === 'series') {
+            console.log(`[🎞️] Cerco episodio ${episode} stagione ${season}...`);
+            const seasonData = await scRequest(`${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`);
+            const epObj = seasonData.props.loadedSeason.episodes.find(e => String(e.number) === String(episode));
+            if (epObj) watchUrl += `?e=${epObj.id}`;
         }
-    } catch (e) { console.error(`[💀] Errore nell'emulazione browser.`); }
+
+        // 4. Estrazione Embed e Token
+        const pageData = await scRequest(watchUrl);
+        const embedUrl = pageData.props?.embedUrl;
+        if (!embedUrl) { console.log(`[❌] Embed URL non trovato`); return { streams: [] }; }
+
+        console.log(`[🔗] Embed trovato: ${embedUrl.substring(0, 40)}...`);
+        const { data: embedHtml } = await axios.get(embedUrl, { headers: { 'User-Agent': BROWSER_DATA.ua } });
+        const token = embedHtml.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
+        const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
+
+        if (token) {
+            const videoUrl = `https://vixcloud.co/playlist/${embedUrl.split('/').pop()}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
+            const stream = { url: videoUrl, title: `SC V8 🎥 1080p` };
+            CACHE.set(id, stream); // Salva in cache
+            console.log(`[🚀] STREAM INVIATO CON SUCCESSO!`);
+            return { streams: [stream] };
+        }
+
+    } catch (e) { console.error(`[💀] Crash: ${e.message}`); }
     return { streams: [] };
 });
 
 const PORT = process.env.PORT || 10000;
 serveHTTP(builder.getInterface(), { port: PORT });
 
-// Ciclo di vita: aggiorna il dominio e ruba l'identità all'avvio
 (async () => {
     try {
         const { data } = await axios.get(LISTA_URL);
         const live = data.split('\n').find(l => l.includes('streamingcommunity'))?.trim();
         if (live) SC_DOMAIN = live.replace(/\/$/, '');
+        console.log(`[🌐] Target: ${SC_DOMAIN}`);
     } catch(e) {}
-    
-    await updateBrowserPersona();
-    // Aggiorna l'identità ogni 30 minuti per evitare scadenze cookie
-    setInterval(updateBrowserPersona, 30 * 60 * 1000);
+    await getBrowserData();
+    setInterval(getBrowserData, 20 * 60 * 1000); // Refresh ogni 20 min
 })();
