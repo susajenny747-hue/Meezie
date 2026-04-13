@@ -1,107 +1,77 @@
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 
-const TMDB_KEY = process.env.TMDB_KEY || ''; 
+const TMDB_KEY = process.env.TMDB_KEY || '';
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'https://flaresolverr-production-b7ab.up.railway.app';
 const LISTA_URL = 'https://raw.githubusercontent.com/susajenny747-hue/Meezie/main/domini.txt';
 
 let SC_DOMAIN = 'https://streamingcommunityz.moe';
-let INERTIA_VERSION = '';
-let SESSION_COOKIES = '';
-let USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+let BROWSER_DATA = {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    cookies: '',
+    inertiaVersion: ''
+};
 
-// 1. FUNZIONE SNIFFER: Recupera la versione Inertia una volta sola
-async function refreshSession() {
+// Configura un'istanza axios che "sembra" un browser vero
+const browser = axios.create({
+    timeout: 15000,
+    validateStatus: false
+});
+
+async function updateBrowserPersona() {
+    console.log(`[🎭] Aggiorno l'identità browser via FlareSolverr...`);
     try {
-        console.log(`[📡] Sniffer: Recupero nuova sessione da ${SC_DOMAIN}...`);
-        const response = await axios.post(`${FLARESOLVERR_URL}/v1`, {
+        const res = await axios.post(`${FLARESOLVERR_URL}/v1`, {
             cmd: 'request.get',
             url: SC_DOMAIN,
             maxTimeout: 60000
         });
 
-        if (response.data.status === 'ok') {
-            const html = response.data.solution.response;
-            // Estraiamo la versione Inertia dall'attributo data-page
-            const versionMatch = html.match(/data-page="[^"]+version&quot;:&quot;([^&]+)&quot;/);
+        if (res.data.status === 'ok') {
+            BROWSER_DATA.cookies = res.data.solution.cookies.map(c => `${c.name}=${c.value}`).join('; ');
+            BROWSER_DATA.ua = res.data.solution.userAgent;
+            
+            // Estrazione chirurgica della versione Inertia
+            const html = res.data.solution.response;
+            const versionMatch = html.match(/version&quot;:&quot;([^&]+)&quot;/);
             if (versionMatch) {
-                INERTIA_VERSION = versionMatch[1];
-                SESSION_COOKIES = response.data.solution.cookies.map(c => `${c.name}=${c.value}`).join('; ');
-                console.log(`[✅] Sessione Pronta! Versione: ${INERTIA_VERSION}`);
+                BROWSER_DATA.inertiaVersion = versionMatch[1];
+                console.log(`[✅] Identità pronta! Versione Inertia: ${BROWSER_DATA.inertiaVersion}`);
             }
         }
     } catch (e) {
-        console.error(`[❌] Errore Sniffer: ${e.message}`);
+        console.error(`[❌] Impossibile ottenere identità browser: ${e.message}`);
     }
 }
 
-// 2. RICERCA TURBO: Usa axios puro con gli header giusti (0.5 secondi)
-async function turboSearch(query) {
-    const q = query.toLowerCase().replace(/[^a-z0-9\s]/g, '');
-    try {
-        const res = await axios.get(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(q)}`, {
-            headers: {
-                'X-Inertia': 'true',
-                'X-Inertia-Version': INERTIA_VERSION,
-                'X-Requested-With': 'XMLHttpRequest',
-                'User-Agent': USER_AGENT,
-                'Cookie': SESSION_COOKIES,
-                'Referer': SC_DOMAIN
-            }
-        });
-
-        // Se ricevi 409, la versione è scaduta: refresha e riprova una volta
-        if (res.status === 409) {
-            await refreshSession();
-            return turboSearch(query);
+async function getJson(url) {
+    const res = await browser.get(url, {
+        headers: {
+            'User-Agent': BROWSER_DATA.ua,
+            'Cookie': BROWSER_DATA.cookies,
+            'X-Inertia': 'true',
+            'X-Inertia-Version': BROWSER_DATA.inertiaVersion,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json, text/plain, */*',
+            'Referer': SC_DOMAIN + '/'
         }
+    });
 
-        const titles = res.data.props.titles?.data || [];
-        console.log(`[📊] TurboSearch: Trovati ${titles.length} risultati.`);
-        return titles;
-    } catch (e) {
-        if (e.response?.status === 409) {
-            await refreshSession();
-            return [];
+    // Se Cloudflare ci ha bloccato o la versione è scaduta (409), proviamo a recuperare la nuova versione dagli header
+    if (res.status === 409) {
+        const newV = res.headers['x-inertia-version'];
+        if (newV) {
+            BROWSER_DATA.inertiaVersion = newV;
+            return getJson(url); // Riprova istantaneamente
         }
-        console.error(`[❌] Errore TurboSearch`);
-        return [];
     }
-}
-
-// 3. ESTRATTORE VIDEO (VixCloud)
-async function getVixToken(scId, epId = null) {
-    const url = epId ? `${SC_DOMAIN}/it/watch/${scId}?e=${epId}` : `${SC_DOMAIN}/it/watch/${scId}`;
-    try {
-        const res = await axios.get(url, {
-            headers: {
-                'X-Inertia': 'true',
-                'X-Inertia-Version': INERTIA_VERSION,
-                'User-Agent': USER_AGENT,
-                'Cookie': SESSION_COOKIES
-            }
-        });
-
-        const embedUrl = res.data.props.embedUrl;
-        if (!embedUrl) return null;
-
-        const { data: embedHtml } = await axios.get(embedUrl, { 
-            headers: { 'User-Agent': USER_AGENT, 'Referer': SC_DOMAIN } 
-        });
-        
-        const token = embedHtml.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
-        const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
-        
-        if (token) {
-            return `https://vixcloud.co/playlist/${embedUrl.split('/').pop()}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
-        }
-    } catch (e) { return null; }
+    return res.data;
 }
 
 const builder = new addonBuilder({
-    id: 'org.meezie.turbo',
-    version: '6.0.0',
-    name: 'Meezie Turbo SC',
+    id: 'org.meezie.veezie.style',
+    version: '7.0.0',
+    name: 'Meezie Browser-Mode',
     resources: ['stream'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -110,38 +80,50 @@ const builder = new addonBuilder({
 
 builder.defineStreamHandler(async ({ type, id }) => {
     const [imdbId, season, episode] = id.split(':');
-    console.log(`[👤] Richiesta: ${imdbId}`);
+    console.log(`[🔎] Ricerca per: ${imdbId}`);
 
     try {
-        const tmdb = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`);
-        const item = tmdb.data.movie_results?.[0] || tmdb.data.tv_results?.[0];
+        // Step 1: TMDB per il titolo italiano
+        const { data: tmdb } = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`);
+        const item = tmdb.movie_results?.[0] || tmdb.tv_results?.[0];
         if (!item) return { streams: [] };
 
-        const results = await turboSearch(item.title || item.name);
-        if (results.length > 0) {
-            const match = results[0];
-            let finalUrl = null;
+        const title = item.title || item.name;
+        
+        // Step 2: Ricerca JSON (come fa l'app di SC o Veezie)
+        const searchData = await getJson(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`);
+        const match = searchData.props?.titles?.data?.[0] || searchData.props?.data?.[0];
 
-            if (type === 'movie') {
-                finalUrl = await getVixToken(match.id);
-            } else {
-                // Per le serie prendiamo l'ID episodio dalla pagina stagione
-                const sUrl = `${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`;
-                const sRes = await axios.get(sUrl, { headers: { 'X-Inertia': 'true', 'X-Inertia-Version': INERTIA_VERSION, 'Cookie': SESSION_COOKIES } });
-                const ep = sRes.data.props.loadedSeason.episodes.find(e => String(e.number) === String(episode));
-                if (ep) finalUrl = await getVixToken(match.id, ep.id);
-            }
+        if (match) {
+            // Step 3: Ottieni l'embed URL
+            const watchUrl = type === 'movie' ? 
+                `${SC_DOMAIN}/it/watch/${match.id}` : 
+                `${SC_DOMAIN}/it/watch/${match.id}?e=${episode}`;
+            
+            const pageData = await getJson(watchUrl);
+            const embedUrl = pageData.props?.embedUrl;
 
-            if (finalUrl) {
-                console.log(`[🚀] Link Generato con successo!`);
-                return { streams: [{ url: finalUrl, title: 'SC Turbo 1080p' }] };
+            if (embedUrl) {
+                // Step 4: Estrazione Token VixCloud
+                const { data: embedHtml } = await axios.get(embedUrl, { headers: { 'User-Agent': BROWSER_DATA.ua } });
+                const token = embedHtml.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
+                const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
+                
+                if (token) {
+                    const finalUrl = `https://vixcloud.co/playlist/${embedUrl.split('/').pop()}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
+                    console.log(`[🚀] Link catturato!`);
+                    return { streams: [{ url: finalUrl, title: `SC BROWSER-MODE 1080p` }] };
+                }
             }
         }
-    } catch (e) { console.error(`[💀] Errore Stream`); }
+    } catch (e) { console.error(`[💀] Errore nell'emulazione browser.`); }
     return { streams: [] };
 });
 
-// Avvio
+const PORT = process.env.PORT || 10000;
+serveHTTP(builder.getInterface(), { port: PORT });
+
+// Ciclo di vita: aggiorna il dominio e ruba l'identità all'avvio
 (async () => {
     try {
         const { data } = await axios.get(LISTA_URL);
@@ -149,6 +131,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
         if (live) SC_DOMAIN = live.replace(/\/$/, '');
     } catch(e) {}
     
-    await refreshSession(); // Esegue lo sniffer all'avvio
-    serveHTTP(builder.getInterface(), { port: process.env.PORT || 10000 });
+    await updateBrowserPersona();
+    // Aggiorna l'identità ogni 30 minuti per evitare scadenze cookie
+    setInterval(updateBrowserPersona, 30 * 60 * 1000);
 })();
