@@ -28,44 +28,47 @@ async function refreshSession() {
             const html = response.data.solution.response;
             const versionMatch = html.match(/"version"\s*:\s*"([^"]+)"/) || html.match(/version&quot;:&quot;([^&]+)&quot;/);
             if (versionMatch) SC_VERSION = versionMatch[1];
-            console.log(`[✅] Sessione Iniziale OK. Versione: ${SC_VERSION}`);
+            console.log(`[✅] Sessione Rigenerata. Versione: ${SC_VERSION}`);
         }
-    } catch (e) { console.error('[❌] Errore Sessione'); }
+    } catch (e) { console.error('[❌] Errore FlareSolverr'); }
 }
 
 async function searchSC(query) {
     const q = cleanTitle(query);
-    const getHeaders = () => ({
+    const url = `${SC_DOMAIN}/it/search?q=${encodeURIComponent(q)}`;
+    
+    // Header quasi identici a un browser reale durante una navigazione Inertia
+    const headers = {
         'User-Agent': SC_USERAGENT,
         'Cookie': SC_COOKIES,
+        'Accept': 'application/json',
         'X-Inertia': 'true',
         'X-Inertia-Version': SC_VERSION,
-        'Accept': 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
         'Referer': `${SC_DOMAIN}/it`
-    });
+    };
 
     try {
-        const { data } = await axios.get(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(q)}`, { headers: getHeaders(), timeout: 10000 });
+        const { data } = await axios.get(url, { headers, timeout: 12000 });
         const results = data?.props?.titles?.data || data?.props?.data || [];
-        console.log(`[📊] "${q}" -> Trovati: ${results.length}`);
+        console.log(`[🔎] Ricerca "${q}": Trovati ${results.length}`);
         return results;
     } catch (e) {
+        // Se otteniamo 409, il sito vuole che aggiorniamo la versione o che "soffriamo" un redirect
         if (e.response?.status === 409) {
-            const newVersion = e.response.headers['x-inertia-version'];
-            if (newVersion) {
-                console.log(`[🔄] Auto-Fix 409: Aggiorno versione a ${newVersion}`);
-                SC_VERSION = newVersion;
-                // Riprova subito con la nuova versione
+            const v = e.response.headers['x-inertia-version'];
+            if (v) {
+                console.log(`[🔄] Update Versione (409) -> ${v}`);
+                SC_VERSION = v;
+                headers['X-Inertia-Version'] = v;
                 try {
-                    const { data: retryData } = await axios.get(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(q)}`, { headers: getHeaders() });
-                    const res = retryData?.props?.titles?.data || retryData?.props?.data || [];
-                    console.log(`[📊] Dopo fix -> Trovati: ${res.length}`);
-                    return res;
+                    const { data: retry } = await axios.get(url, { headers });
+                    return retry?.props?.titles?.data || retry?.props?.data || [];
                 } catch (err) { return []; }
             }
         }
-        console.error(`[❌] Errore 409 persistente o altro: ${e.message}`);
+        // Se fallisce ancora, proviamo a svuotare l'header X-Inertia-Version (alcuni siti lo digeriscono così)
+        console.error(`[⚠️] Fallimento ricerca "${q}" (Status ${e.response?.status})`);
         return [];
     }
 }
@@ -89,15 +92,16 @@ async function getVixStream(scId, episodeId = null) {
         const token = embedHtml.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
         const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
         if (token && expires) {
-            return `https://vixcloud.co/playlist/${embedUrl.split('/').pop()}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
+            const vixId = embedUrl.split('/').pop();
+            return `https://vixcloud.co/playlist/${vixId}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
         }
     } catch (e) { return null; }
 }
 
 const builder = new addonBuilder({
-    id: 'org.meezie.sc.fixed409',
-    version: '2.5.0',
-    name: 'Meezie SC (Fix 409)',
+    id: 'org.meezie.sc.ultra.v3',
+    version: '3.0.0',
+    name: 'Meezie SC Ultra V3',
     resources: ['stream'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -106,7 +110,7 @@ const builder = new addonBuilder({
 
 builder.defineStreamHandler(async ({ type, id }) => {
     const [imdbId, season, episode] = id.split(':');
-    console.log(`[👤] Richiesta: ${id}`);
+    console.log(`[👤] Richiesta Stremio: ${id}`);
     
     try {
         const tmdbUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`;
@@ -114,18 +118,22 @@ builder.defineStreamHandler(async ({ type, id }) => {
         const info = tmdbRes.data.movie_results?.[0] || tmdbRes.data.tv_results?.[0];
         if (!info) return { streams: [] };
 
-        const title = info.title || info.name;
-        let results = await searchSC(title);
+        const titleIta = info.title || info.name;
+        let results = await searchSC(titleIta);
 
         if (results.length === 0 && (info.original_title || info.original_name)) {
             results = await searchSC(info.original_title || info.original_name);
         }
 
-        if (results.length === 0) return { streams: [] };
+        if (results.length === 0) {
+            console.log(`[❌] Nessun risultato per: ${titleIta}`);
+            return { streams: [] };
+        }
 
         const match = results[0];
-        let streamUrl = null;
+        console.log(`[🎯] Match: ${match.name}`);
 
+        let streamUrl = null;
         if (type === 'movie') {
             streamUrl = await getVixStream(match.id);
         } else {
@@ -137,10 +145,16 @@ builder.defineStreamHandler(async ({ type, id }) => {
             if (epData) streamUrl = await getVixStream(match.id, epData.id);
         }
 
-        return { streams: streamUrl ? [{ url: streamUrl, title: `SC 🚀 1080p` }] : [] };
-    } catch (e) { return { streams: [] }; }
+        return { 
+            streams: streamUrl ? [{ url: streamUrl, title: `SC 🚀 1080p\n(VixCloud)` }] : [] 
+        };
+    } catch (e) { 
+        console.error(`[❌] Errore Handler: ${e.message}`);
+        return { streams: [] }; 
+    }
 });
 
-serveHTTP(builder.getInterface(), { port: process.env.PORT || 10000 });
+const PORT = process.env.PORT || 10000;
+serveHTTP(builder.getInterface(), { port: PORT });
 refreshSession();
-setInterval(refreshSession, 1000 * 60 * 30);
+setInterval(refreshSession, 1000 * 60 * 20); // Più frequente per evitare scadenze cookie
