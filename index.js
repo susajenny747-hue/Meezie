@@ -47,7 +47,6 @@ async function refreshSession() {
             SESSION.cookies = solution.cookies.map(c => `${c.name}=${c.value}`).join('; ');
             SESSION.ua = solution.userAgent;
 
-            // Estrae la versione Inertia dalla risposta HTML
             const inertiaMatch = solution.response.match(/X-Inertia-Version" content="([^"]+)"/i) ||
                                  solution.response.match(/version&quot;:&quot;([^&]+)&quot;/);
             if (inertiaMatch) SESSION.inertia = inertiaMatch[1];
@@ -78,7 +77,6 @@ async function callInternalApi(url, retry = true) {
 
         const res = await api.get(url, { headers });
 
-        // Gestione redirect Inertia
         if (res.status === 409 || res.headers['x-inertia-location']) {
             const nextUrl = res.headers['x-inertia-location'] || url;
             console.log(`[🔄] Redirect Inertia verso: ${nextUrl}`);
@@ -86,7 +84,6 @@ async function callInternalApi(url, retry = true) {
             return callInternalApi(nextUrl, false);
         }
 
-        // Se la risposta è HTML ma contiene dati Inertia embedded
         if (typeof res.data === 'string' && !res.headers['content-type']?.includes('json')) {
             const jsonMatch = res.data.match(/<script id="__INERTIA_DATA" type="application\/json">(.*?)<\/script>/s);
             if (jsonMatch) return JSON.parse(jsonMatch[1]);
@@ -105,7 +102,6 @@ async function callInternalApi(url, retry = true) {
 }
 
 function extractTokenFromEmbed(html) {
-    // Cerca token in vari formati possibili
     let match = html.match(/"token"\s*:\s*"([a-f0-9]+)"/i);
     if (!match) match = html.match(/token=([a-f0-9]+)/i);
     if (!match) match = html.match(/['"]token['"]\s*:\s*['"]([^'"]+)['"]/i);
@@ -132,14 +128,12 @@ const builder = new addonBuilder({
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
-    // id può essere "tt1234567" o "tt1234567:1:2" per serie
     const [imdbId, season, episode] = id.split(':');
 
     const cached = getCache(id);
     if (cached) return { streams: [cached] };
 
     try {
-        // 1. Recupera titolo da TMDB
         const tmdbRes = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}`, {
             params: {
                 api_key: TMDB_KEY,
@@ -156,11 +150,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
         const title = item.title || item.name;
         console.log(`[🔎] Ricerca: "${title}" (${type})`);
 
-        // 2. Cerca su StreamingCommunity
         const searchUrl = `${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`;
         const searchData = await callInternalApi(searchUrl);
 
-        // Estrae i risultati in modo flessibile
         let results = [];
         if (searchData.props?.titles?.data) results = searchData.props.titles.data;
         else if (searchData.props?.titles) results = searchData.props.titles;
@@ -179,7 +171,6 @@ builder.defineStreamHandler(async ({ type, id }) => {
         }
 
         let watchUrl = `${SC_DOMAIN}/it/watch/${match.id}`;
-        // Gestione episodi per serie
         if (type === 'series' && season && episode) {
             try {
                 const seasonUrl = `${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`;
@@ -197,7 +188,6 @@ builder.defineStreamHandler(async ({ type, id }) => {
             }
         }
 
-        // 3. Ottieni embedUrl dalla pagina watch
         const watchData = await callInternalApi(watchUrl);
         let embedUrl = watchData.props?.embedUrl;
         if (!embedUrl && watchData.props?.video?.embedUrl) embedUrl = watchData.props.video.embedUrl;
@@ -206,13 +196,11 @@ builder.defineStreamHandler(async ({ type, id }) => {
             return { streams: [] };
         }
 
-        // 4. Scarica la pagina embed di VixCloud
         const embedHtmlRes = await axios.get(embedUrl, {
             headers: { 'User-Agent': SESSION.ua }
         });
         const embedHtml = embedHtmlRes.data;
 
-        // 5. Estrai token
         const tokenData = extractTokenFromEmbed(embedHtml);
         if (!tokenData || !tokenData.token) {
             console.log(`[❌] Token non trovato nella embed page`);
@@ -239,11 +227,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
     }
 });
 
-// ========== AVVIO SERVER ==========
 const PORT = process.env.PORT || 10000;
 serveHTTP(builder.getInterface(), { port: PORT });
 
-// Inizializza la sessione e rinnova ogni 20 minuti
 (async () => {
     await refreshSession();
     setInterval(refreshSession, 20 * 60 * 1000);
