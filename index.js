@@ -3,7 +3,7 @@ const axios = require('axios');
 
 // ─── CONFIGURAZIONE ──────────────────────────────────────────────────────────
 const LISTA_URL        = 'https://raw.githubusercontent.com/susajenny747-hue/sc-addon-stremio/main/domini.txt';
-const TMDB_KEY         = process.env.TMDB_KEY || 'INSERISCI_QUI_TUA_KEY'; 
+const TMDB_KEY         = process.env.TMDB_KEY || ''; 
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'http://localhost:8191';
 
 let SC_DOMAIN          = 'https://streamingcommunityz.pet';
@@ -22,38 +22,36 @@ const getHeadersInertia = () => ({
     'Accept': 'application/json, text/plain, */*'
 });
 
-// Pulisce il titolo per la ricerca (es: "Spider-Man: No Way Home" -> "Spider Man No Way Home")
 const cleanTitle = (t) => t.replace(/[^\w\s]/gi, ' ').replace(/\s+/g, ' ').trim();
 
 // ─── AGGIORNAMENTO DOMINIO E SESSIONE ────────────────────────────────────────
 async function refreshSession() {
     try {
-        // 1. Aggiorna Dominio da GitHub
-        const { data: list } = await axios.get(LISTA_URL, { timeout: 5000 });
-        const liveDomain = list.split('\n').find(l => l.includes('streamingcommunity'))?.trim();
-        if (liveDomain) SC_DOMAIN = liveDomain.replace(/\/$/, '');
+        console.log('[🔄] Aggiornamento sessione e domini...');
+        const { data: list } = await axios.get(LISTA_URL, { timeout: 5000 }).catch(() => ({ data: SC_DOMAIN }));
+        if (typeof list === 'string') {
+            const liveDomain = list.split('\n').find(l => l.includes('streamingcommunity'))?.trim();
+            if (liveDomain) SC_DOMAIN = liveDomain.replace(/\/$/, '');
+        }
 
-        // 2. Buca Cloudflare con FlareSolverr
-        console.log(`[🔓] Tentativo accesso a: ${SC_DOMAIN}`);
         const { data } = await axios.post(`${FLARESOLVERR_URL}/v1`, {
             cmd: 'request.get',
             url: `${SC_DOMAIN}/it`,
             maxTimeout: 60000
-        });
+        }, { timeout: 70000 });
 
         if (data.status === 'ok') {
             SC_COOKIES = data.solution.cookies.map(c => `${c.name}=${c.value}`).join('; ');
             SC_USERAGENT = data.solution.userAgent;
             
-            // Estrae la versione Inertia dall'HTML (fondamentale per le API JSON)
             const versionMatch = data.solution.response.match(/"version"\s*:\s*"([^"]+)"/);
             if (versionMatch) {
                 SC_INERTIA_VERSION = versionMatch[1];
-                console.log(`[✅] Sessione OK. Inertia-Version: ${SC_INERTIA_VERSION}`);
+                console.log(`[✅] Sessione OK. Dominio: ${SC_DOMAIN} | Version: ${SC_INERTIA_VERSION}`);
             }
         }
     } catch (e) {
-        console.error('[❌] Errore inizializzazione:', e.message);
+        console.error('[❌] Errore refreshSession:', e.message);
     }
 }
 
@@ -65,6 +63,7 @@ async function searchSC(query) {
         const { data } = await axios.get(url, { headers: getHeadersInertia(), timeout: 10000 });
         return data?.props?.titles?.data || data?.props?.data || [];
     } catch (e) {
+        console.warn(`[⚠️] Ricerca fallita per: ${q}`);
         return [];
     }
 }
@@ -72,14 +71,12 @@ async function searchSC(query) {
 // ─── ESTRATTORE STREAM VIXCLOUD ──────────────────────────────────────────────
 async function getVixStream(videoId) {
     try {
-        // Chiediamo a SC l'URL dell'embed
         const { data: watchData } = await axios.get(`${SC_DOMAIN}/it/watch/${videoId}`, { 
             headers: getHeadersInertia() 
         });
         
         const embedUrl = watchData.props.embedUrl || `https://vixcloud.co/embed/${videoId}`;
         
-        // Entriamo nell'embed di Vixcloud per prendere i token temporanei
         const { data: embedHtml } = await axios.get(embedUrl, { 
             headers: { 'User-Agent': SC_USERAGENT, 'Referer': SC_DOMAIN } 
         });
@@ -92,7 +89,6 @@ async function getVixStream(videoId) {
             return `https://vixcloud.co/playlist/${vixId}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
         }
         
-        // Fallback: cerca un m3u8 nudo nell'HTML
         const m3u8Match = embedHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
         return m3u8Match ? m3u8Match[1] : null;
     } catch (e) {
@@ -100,44 +96,53 @@ async function getVixStream(videoId) {
     }
 }
 
-// ─── ADDON DEFINITION ────────────────────────────────────────────────────────
-const builder = new addonBuilder({
+// ─── MANIFEST (CORRETTO PER LINTER) ──────────────────────────────────────────
+const manifest = {
     id: 'org.meezie.stremio.sc',
-    version: '1.5.0',
+    version: '1.5.1',
     name: 'Meezie SC (Robust Mode)',
     description: 'StreamingCommunity con fallback automatici e Inertia JSON',
     resources: ['stream'],
     types: ['movie', 'series'],
-    idPrefixes: ['tt']
-});
+    idPrefixes: ['tt'],
+    catalogs: [] // <--- FONDAMENTALE: Deve essere un array vuoto
+};
 
+const builder = new addonBuilder(manifest);
+
+// ─── STREAM HANDLER ───────────────────────────────────────────────────────────
 builder.defineStreamHandler(async ({ type, id }) => {
+    console.log(`[🔎] Richiesta stream per ID: ${id}`);
     const [imdbId, season, episode] = id.split(':');
     
-    // 1. Dati TMDB (per avere i titoli in italiano e originale)
-    const tmdbRes = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`).catch(() => null);
-    const info = tmdbRes?.data.movie_results?.[0] || tmdbRes?.data.tv_results?.[0];
-    if (!info) return { streams: [] };
-
-    const titlesToTry = [info.title || info.name, info.original_title || info.original_name];
-    let results = [];
-
-    // 2. Ricerca con Fallback (come Veezie)
-    for (const title of titlesToTry) {
-        if (!title) continue;
-        results = await searchSC(title);
-        if (results.length > 0) break;
-    }
-
-    if (results.length === 0) return { streams: [] };
-
-    // Filtriamo per tipo (film vs serie)
-    const scType = type === 'movie' ? 'movie' : 'tv';
-    const match = results.find(r => r.type === scType) || results[0];
-
-    // 3. Recupero Video ID
-    let videoId = null;
     try {
+        // 1. Dati TMDB
+        const tmdbUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`;
+        const tmdbRes = await axios.get(tmdbUrl).catch(() => null);
+        const info = tmdbRes?.data.movie_results?.[0] || tmdbRes?.data.tv_results?.[0];
+        
+        if (!info) {
+            console.error('[❌] TMDB non ha restituito info. Verifica la API KEY.');
+            return { streams: [] };
+        }
+
+        const titlesToTry = [info.title || info.name, info.original_title || info.original_name];
+        let results = [];
+
+        // 2. Ricerca con Fallback
+        for (const title of titlesToTry) {
+            if (!title) continue;
+            results = await searchSC(title);
+            if (results.length > 0) break;
+        }
+
+        if (results.length === 0) return { streams: [] };
+
+        const scType = type === 'movie' ? 'movie' : 'tv';
+        const match = results.find(r => r.type === scType) || results[0];
+
+        // 3. Recupero Video ID
+        let videoId = null;
         const titleUrl = type === 'movie' 
             ? `${SC_DOMAIN}/it/titles/${match.id}-${match.slug}`
             : `${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`;
@@ -148,27 +153,34 @@ builder.defineStreamHandler(async ({ type, id }) => {
             videoId = pageData.props.title.videos[0]?.id;
         } else {
             const ep = pageData.props.loadedSeason.episodes.find(e => String(e.number) === String(episode));
-            videoId = ep?.videos[0]?.id;
+            videoId = ep?.videos[0]?.id || ep?.id;
         }
-    } catch (e) { console.error('[🎬] ID non trovato'); }
 
-    if (!videoId) return { streams: [] };
+        if (!videoId) return { streams: [] };
 
-    // 4. Link Finale
-    const streamUrl = await getVixStream(videoId);
+        // 4. Link Finale
+        const streamUrl = await getVixStream(videoId);
 
-    return {
-        streams: streamUrl ? [{
-            url: streamUrl,
-            title: `StreamingCommunity 🚀\n1080p - VixCloud`,
-            behaviorHints: { notWebReady: false }
-        }] : []
-    };
+        if (streamUrl) {
+            console.log(`[✅] Stream trovato: ${match.name}`);
+            return {
+                streams: [{
+                    url: streamUrl,
+                    title: `StreamingCommunity 🚀\n1080p - VixCloud`,
+                    behaviorHints: { notWebReady: false }
+                }]
+            };
+        }
+    } catch (e) {
+        console.error('[❌] Errore Handler:', e.message);
+    }
+    return { streams: [] };
 });
 
-// ─── START ───────────────────────────────────────────────────────────────────
+// ─── SERVER START ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 7000;
 serveHTTP(builder.getInterface(), { port: PORT });
 
+// Inizializzazione
 refreshSession();
-setInterval(refreshSession, 1000 * 60 * 60); // Refresh ogni ora
+setInterval(refreshSession, 1000 * 60 * 60); // Ogni ora
