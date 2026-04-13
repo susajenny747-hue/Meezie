@@ -5,12 +5,17 @@ const TMDB_KEY = process.env.TMDB_KEY || '';
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'https://flaresolverr-production-b7ab.up.railway.app';
 
 let SC_DOMAIN = 'https://streamingcommunityz.moe';
-let SESSION = { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0 Safari/537.36', cookies: '', inertia: '' };
+let SESSION = { ua: '', cookies: '', inertia: '' };
+const CACHE = new Map();
 
-const api = axios.create({ timeout: 10000 });
+const api = axios.create({ 
+    timeout: 15000,
+    maxRedirects: 5,
+    validateStatus: (s) => s < 500 
+});
 
-// Recupera le chiavi d'accesso iniziali (Cloudflare Bypass)
 async function refreshSession() {
+    console.log(`[📡] Sincronizzazione sessione (FlareSolverr)...`);
     try {
         const res = await axios.post(`${FLARESOLVERR_URL}/v1`, {
             cmd: 'request.get', url: SC_DOMAIN, maxTimeout: 60000
@@ -20,12 +25,11 @@ async function refreshSession() {
             SESSION.ua = res.data.solution.userAgent;
             const m = res.data.solution.response.match(/version&quot;:&quot;([^&]+)&quot;/);
             if (m) SESSION.inertia = m[1];
-            console.log(`[📡] Sessione Webstreamr-Style Attiva. Inertia: ${SESSION.inertia}`);
+            console.log(`[✅] Sessione Webstreamr-Style Attiva. V: ${SESSION.inertia}`);
         }
     } catch (e) { console.error(`[❌] Errore Sessione`); }
 }
 
-// Chiamata API "Pura" (Simula il caricamento dati interno)
 async function callInternalApi(url) {
     const res = await api.get(url, {
         headers: {
@@ -34,22 +38,26 @@ async function callInternalApi(url) {
             'X-Inertia': 'true',
             'X-Inertia-Version': SESSION.inertia,
             'X-Requested-With': 'XMLHttpRequest',
-            'Accept': 'application/json'
-        },
-        validateStatus: (s) => s < 500
+            'Accept': 'application/json',
+            'Referer': SC_DOMAIN + '/'
+        }
     });
 
-    if (res.status === 409) {
-        SESSION.inertia = res.headers['x-inertia-version'] || SESSION.inertia;
-        return callInternalApi(url); // Retry istantaneo con nuova versione
+    // Se il sito risponde con un redirect (Inertia-Location), seguiamo il redirect manualmente
+    if (res.status === 409 || res.headers['x-inertia-location']) {
+        const nextUrl = res.headers['x-inertia-location'] || url;
+        console.log(`[🔄] Gestione Redirect/Version Mismatch verso: ${nextUrl}`);
+        if (res.headers['x-inertia-version']) SESSION.inertia = res.headers['x-inertia-version'];
+        return callInternalApi(nextUrl);
     }
+    
     return res.data;
 }
 
 const builder = new addonBuilder({
-    id: 'org.meezie.webstreamr',
-    version: '11.0.0',
-    name: 'Meezie Webstreamr-Engine',
+    id: 'org.meezie.v12',
+    version: '12.0.0',
+    name: 'Meezie V12 Redirect-Fix',
     resources: ['stream'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -57,32 +65,34 @@ const builder = new addonBuilder({
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
-    const [imdbId, season, episode] = id.split(':');
+    if (CACHE.has(id)) return { streams: [CACHE.get(id)] };
     
+    const [imdbId, season, episode] = id.split(':');
     try {
-        // 1. Risoluzione Titolo
         const tmdb = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`);
         const item = tmdb.data.movie_results?.[0] || tmdb.data.tv_results?.[0];
         if (!item) return { streams: [] };
         const title = item.title || item.name;
 
-        // 2. Ricerca API (molto più veloce del browsing)
-        const search = await callInternalApi(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`);
-        const results = search.props?.titles?.data || [];
-        const match = results.find(r => r.name.toLowerCase().includes(title.toLowerCase()) || title.toLowerCase().includes(r.name.toLowerCase()));
+        console.log(`[🔎] Ricerca: ${title}`);
+        const searchRes = await callInternalApi(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(title)}`);
+        
+        // Estrazione dati flessibile per bypassare il redirect
+        const results = searchRes.props?.titles?.data || searchRes.props?.titles || [];
+        const match = results.find(r => 
+            r.name?.toLowerCase().includes(title.toLowerCase()) || 
+            title.toLowerCase().includes(r.name?.toLowerCase())
+        );
 
         if (match) {
-            let targetUrl = `${SC_DOMAIN}/it/watch/${match.id}`;
-            
-            // 3. Se è una serie, otteniamo l'ID episodio specifico
+            let watchUrl = `${SC_DOMAIN}/it/watch/${match.id}`;
             if (type === 'series') {
                 const sData = await callInternalApi(`${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`);
-                const ep = sData.props.loadedSeason.episodes.find(e => String(e.number) === String(episode));
-                if (ep) targetUrl += `?e=${ep.id}`;
+                const ep = (sData.props?.loadedSeason?.episodes || []).find(e => String(e.number) === String(episode));
+                if (ep) watchUrl += `?e=${ep.id}`;
             }
 
-            // 4. Estrazione Master Playlist (vixcloud)
-            const watchData = await callInternalApi(targetUrl);
+            const watchData = await callInternalApi(watchUrl);
             const embedUrl = watchData.props?.embedUrl;
 
             if (embedUrl) {
@@ -91,17 +101,18 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
                 const vixId = embedUrl.split('/').pop();
 
-                if (token && expires) {
-                    // Restituiamo il formato Master Playlist che hai indicato
-                    return { streams: [{
+                if (token) {
+                    const stream = {
                         url: `https://vixcloud.co/playlist/${vixId}?token=${token}&expires=${expires}&h=1`,
-                        title: `WEBSTREAMR-MODE 🚀 Multi-Res`,
-                        behaviorHints: { notWebReady: true }
-                    }]};
+                        title: `Meezie V12 🚀 Vix-Master`
+                    };
+                    CACHE.set(id, stream);
+                    console.log(`[🚀] STREAM PRONTO!`);
+                    return { streams: [stream] };
                 }
             }
         }
-    } catch (e) { console.error(`[💀] Crash: ${e.message}`); }
+    } catch (e) { console.error(`[💀] Errore: ${e.message}`); }
     return { streams: [] };
 });
 
