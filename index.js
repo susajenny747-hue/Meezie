@@ -1,21 +1,35 @@
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 
-const TMDB_KEY = process.env.TMDB_KEY || ''; 
+// ─── CONFIGURAZIONE ──────────────────────────────────────────────────────────
+const LISTA_URL  = 'https://raw.githubusercontent.com/susajenny747-hue/sc-addon-stremio/main/domini.txt';
+const TMDB_KEY   = process.env.TMDB_KEY || ''; 
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'https://flaresolverr-production-b7ab.up.railway.app';
 
-// AGGIORNATO: Dominio attuale
-let SC_DOMAIN = 'https://streamingcommunityz.moe'; 
-let SC_COOKIES = '';
+let SC_DOMAIN    = 'https://streamingcommunityz.moe'; // Dominio di partenza
+let SC_COOKIES   = '';
 let SC_USERAGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-let SC_VERSION = ''; 
+let SC_VERSION   = ''; 
 
 const cleanTitle = (t) => t.replace(/[^\w\s]/gi, ' ').replace(/\s+/g, ' ').trim();
 
-// ─── AGGIORNAMENTO SESSIONE SUL DOMINIO CORRETTO ─────────────────────────────
+// ─── REFRESH SESSIONE E DOMINIO ──────────────────────────────────────────────
 async function refreshSession() {
     try {
-        console.log(`[🚀] FlareSolverr: Accedo a ${SC_DOMAIN} per ottenere i nuovi parametri...`);
+        // A. Tenta di aggiornare il dominio dal tuo file TXT
+        try {
+            const { data: list } = await axios.get(LISTA_URL, { timeout: 5000 });
+            const liveDomain = list.split('\n').find(l => l.includes('streamingcommunity'))?.trim();
+            if (liveDomain) {
+                SC_DOMAIN = liveDomain.replace(/\/$/, '');
+                console.log(`[🌐] Dominio aggiornato da GitHub: ${SC_DOMAIN}`);
+            }
+        } catch (e) {
+            console.warn('[⚠️] GitHub non raggiungibile, uso dominio predefinito.');
+        }
+
+        // B. Ottieni i cookie via FlareSolverr
+        console.log(`[🚀] FlareSolverr su: ${SC_DOMAIN}`);
         const response = await axios.post(`${FLARESOLVERR_URL}/v1`, {
             cmd: 'request.get',
             url: `${SC_DOMAIN}/it`,
@@ -26,16 +40,15 @@ async function refreshSession() {
             SC_COOKIES = response.data.solution.cookies.map(c => `${c.name}=${c.value}`).join('; ');
             SC_USERAGENT = response.data.solution.userAgent;
             
-            // Estrazione versione Inertia
             const html = response.data.solution.response;
             const versionMatch = html.match(/"version"\s*:\s*"([^"]+)"/);
             if (versionMatch) {
                 SC_VERSION = versionMatch[1];
-                console.log(`[✅] Sessione OK su ${SC_DOMAIN} | Versione: ${SC_VERSION}`);
+                console.log(`[✅] Sessione Pronta! Versione Inertia: ${SC_VERSION}`);
             }
         }
     } catch (e) {
-        console.error('[❌] Errore FlareSolverr (Dominio errato o timeout):', e.message);
+        console.error('[❌] Errore critico sessione:', e.message);
     }
 }
 
@@ -43,7 +56,6 @@ async function refreshSession() {
 async function searchSC(query) {
     const q = cleanTitle(query);
     const url = `${SC_DOMAIN}/it/search?q=${encodeURIComponent(q)}`;
-    
     try {
         const { data } = await axios.get(url, {
             headers: {
@@ -58,21 +70,15 @@ async function searchSC(query) {
         });
         return data?.props?.titles?.data || data?.props?.data || [];
     } catch (e) {
-        console.warn(`[⚠️] Ricerca fallita per ${q}. Status: ${e.response?.status}`);
         return [];
     }
 }
 
-// ─── ESTRATTORE VIDEO ────────────────────────────────────────────────────────
+// ─── STREAM ──────────────────────────────────────────────────────────────────
 async function getVixStream(videoId) {
     try {
         const { data: watchPage } = await axios.get(`${SC_DOMAIN}/it/watch/${videoId}`, {
-            headers: {
-                'User-Agent': SC_USERAGENT,
-                'Cookie': SC_COOKIES,
-                'X-Inertia': 'true',
-                'X-Inertia-Version': SC_VERSION
-            }
+            headers: { 'User-Agent': SC_USERAGENT, 'Cookie': SC_COOKIES, 'X-Inertia': 'true', 'X-Inertia-Version': SC_VERSION }
         });
 
         const embedUrl = watchPage.props.embedUrl;
@@ -93,12 +99,12 @@ async function getVixStream(videoId) {
     } catch (e) { return null; }
 }
 
-// ─── CONFIGURAZIONE ADDON ────────────────────────────────────────────────────
+// ─── STREMIO ADDON ───────────────────────────────────────────────────────────
 const builder = new addonBuilder({
     id: 'org.meezie.stremio.moe',
-    version: '1.8.0',
-    name: 'Meezie SC (Moe Edition)',
-    description: 'StreamingCommunity aggiornato a .moe',
+    version: '1.8.5',
+    name: 'Meezie SC Final',
+    description: 'StreamingCommunity con auto-aggiornamento dominio',
     resources: ['stream'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -107,8 +113,6 @@ const builder = new addonBuilder({
 
 builder.defineStreamHandler(async ({ type, id }) => {
     const [imdbId, season, episode] = id.split(':');
-    console.log(`[🔎] Richiesta: ${id} su dominio .moe`);
-    
     try {
         const tmdbUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`;
         const tmdbRes = await axios.get(tmdbUrl).catch(() => null);
@@ -126,12 +130,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
             : `${SC_DOMAIN}/it/titles/${match.id}-${match.slug}/seasons/${season}`;
 
         const { data: titleData } = await axios.get(titlePageUrl, {
-            headers: {
-                'User-Agent': SC_USERAGENT,
-                'Cookie': SC_COOKIES,
-                'X-Inertia': 'true',
-                'X-Inertia-Version': SC_VERSION
-            }
+            headers: { 'User-Agent': SC_USERAGENT, 'Cookie': SC_COOKIES, 'X-Inertia': 'true', 'X-Inertia-Version': SC_VERSION }
         });
 
         let videoId = null;
@@ -147,19 +146,14 @@ builder.defineStreamHandler(async ({ type, id }) => {
         return {
             streams: streamUrl ? [{
                 url: streamUrl,
-                title: `SC (.moe) 🚀\n1080p - VixCloud`,
+                title: `SC 🚀\n1080p - VixCloud`,
                 behaviorHints: { notWebReady: false }
             }] : []
         };
-    } catch (e) {
-        return { streams: [] };
-    }
+    } catch (e) { return { streams: [] }; }
 });
 
 const PORT = process.env.PORT || 10000;
 serveHTTP(builder.getInterface(), { port: PORT });
-
-// Prima inizializzazione
 refreshSession();
-// Refresh ogni 30 minuti
 setInterval(refreshSession, 1000 * 60 * 30);
