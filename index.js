@@ -18,6 +18,7 @@ async function refreshSession() {
         const liveDomain = list.split('\n').find(l => l.includes('streamingcommunity'))?.trim();
         if (liveDomain) SC_DOMAIN = liveDomain.replace(/\/$/, '');
 
+        console.log(`[🌐] Dominio: ${SC_DOMAIN}`);
         const response = await axios.post(`${FLARESOLVERR_URL}/v1`, {
             cmd: 'request.get', url: `${SC_DOMAIN}/it`, maxTimeout: 60000
         }, { timeout: 100000 });
@@ -28,64 +29,91 @@ async function refreshSession() {
             const html = response.data.solution.response;
             const versionMatch = html.match(/"version"\s*:\s*"([^"]+)"/) || html.match(/version&quot;:&quot;([^&]+)&quot;/);
             if (versionMatch) SC_VERSION = versionMatch[1];
-            console.log(`[✅] Sessione OK. Versione: ${SC_VERSION}`);
+            console.log(`[✅] Sessione OK. Versione Inertia: ${SC_VERSION}`);
         }
     } catch (e) { console.error('[❌] Errore Sessione:', e.message); }
 }
 
 async function searchSC(query) {
     const q = cleanTitle(query);
-    const headers = { 'User-Agent': SC_USERAGENT, 'Cookie': SC_COOKIES, 'X-Inertia': 'true', 'X-Inertia-Version': SC_VERSION, 'Accept': 'application/json' };
+    const headers = { 
+        'User-Agent': SC_USERAGENT, 
+        'Cookie': SC_COOKIES, 
+        'X-Inertia': 'true', 
+        'X-Inertia-Version': SC_VERSION, 
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest'
+    };
     try {
+        console.log(`[🔎] Ricerca su SC: ${q}`);
         const { data } = await axios.get(`${SC_DOMAIN}/it/search?q=${encodeURIComponent(q)}`, { headers, timeout: 15000 });
-        return data?.props?.titles?.data || data?.props?.data || [];
-    } catch (e) { return []; }
+        const results = data?.props?.titles?.data || data?.props?.data || [];
+        console.log(`[📊] Risultati trovati: ${results.length}`);
+        return results;
+    } catch (e) {
+        console.error(`[❌] Errore ricerca: ${e.response?.status || e.message}`);
+        return [];
+    }
 }
 
 async function getVixStream(scId, episodeId = null) {
     try {
         const watchUrl = episodeId ? `${SC_DOMAIN}/it/watch/${scId}?e=${episodeId}` : `${SC_DOMAIN}/it/watch/${scId}`;
+        console.log(`[🛰️] Estrazione video da: ${watchUrl}`);
         const { data: watchPage } = await axios.get(watchUrl, {
             headers: { 'User-Agent': SC_USERAGENT, 'Cookie': SC_COOKIES, 'X-Inertia': 'true', 'X-Inertia-Version': SC_VERSION }
         });
         const embedUrl = watchPage.props.embedUrl;
         if (!embedUrl) return null;
+
         const { data: embedHtml } = await axios.get(embedUrl, { headers: { 'User-Agent': SC_USERAGENT, 'Referer': SC_DOMAIN } });
         const token = embedHtml.match(/"token"\s*:\s*"([^"]+)"/)?.[1];
         const expires = embedHtml.match(/"expires"\s*:\s*"(\d+)"/)?.[1];
         if (token && expires) {
             return `https://vixcloud.co/playlist/${embedUrl.split('/').pop()}?type=video&rendition=1080p&token=${token}&expires=${expires}`;
         }
-    } catch (e) { return null; }
+    } catch (e) { console.error(`[❌] Errore VixCloud: ${e.message}`); return null; }
 }
 
-// --- FIX MANIFEST ---
 const builder = new addonBuilder({
-    id: 'org.meezie.sc.ultra.final',
-    version: '2.3.1',
-    name: 'Meezie SC Ultra',
-    description: 'StreamingCommunity con fix The Boys',
+    id: 'org.meezie.sc.debug',
+    version: '2.4.0',
+    name: 'Meezie SC (Debug Mode)',
     resources: ['stream'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
-    catalogs: [] // Array vuoto obbligatorio
+    catalogs: []
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
+    console.log(`[👤] Richiesta Stremio ID: ${id}`);
     const [imdbId, season, episode] = id.split(':');
-    console.log(`[🔎] Richiesta: ${id}`);
+    
     try {
         const tmdbUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=it-IT`;
         const tmdbRes = await axios.get(tmdbUrl);
         const info = tmdbRes.data.movie_results?.[0] || tmdbRes.data.tv_results?.[0];
-        if (!info) return { streams: [] };
+        
+        if (!info) {
+            console.log(`[❌] Titolo non trovato su TMDB`);
+            return { streams: [] };
+        }
 
-        const results = await searchSC(info.title || info.name);
-        if (!results.length) return { streams: [] };
+        const title = info.title || info.name;
+        console.log(`[🎬] Titolo TMDB: ${title}`);
+
+        let results = await searchSC(title);
+        if (results.length === 0 && (info.original_title || info.original_name)) {
+            console.log(`[🔄] Riprovo con titolo originale...`);
+            results = await searchSC(info.original_title || info.original_name);
+        }
+
+        if (results.length === 0) return { streams: [] };
 
         const match = results[0];
-        let streamUrl = null;
+        console.log(`[🎯] Match trovato: ${match.name} (ID: ${match.id})`);
 
+        let streamUrl = null;
         if (type === 'movie') {
             streamUrl = await getVixStream(match.id);
         } else {
@@ -94,11 +122,20 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 headers: { 'User-Agent': SC_USERAGENT, 'Cookie': SC_COOKIES, 'X-Inertia': 'true', 'X-Inertia-Version': SC_VERSION }
             });
             const epData = seasonData.props.loadedSeason.episodes.find(e => String(e.number) === String(episode));
-            if (epData) streamUrl = await getVixStream(match.id, epData.id);
+            if (epData) {
+                console.log(`[📺] Episodio trovato! ID Interno: ${epData.id}`);
+                streamUrl = await getVixStream(match.id, epData.id);
+            } else {
+                console.log(`[❌] Episodio non trovato nella stagione`);
+            }
         }
 
+        if (streamUrl) console.log(`[🚀] STREAM PRONTO!`);
         return { streams: streamUrl ? [{ url: streamUrl, title: `SC 🚀 1080p` }] : [] };
-    } catch (e) { return { streams: [] }; }
+    } catch (e) { 
+        console.error(`[❌] Crash Handler: ${e.message}`);
+        return { streams: [] }; 
+    }
 });
 
 const PORT = process.env.PORT || 10000;
