@@ -12,7 +12,7 @@ const cleanTitle = (t) => t.toLowerCase().replace(/\(.*\)/g, '').replace(/[^a-z0
 
 async function flareRequest(url) {
     try {
-        console.log(`[☁️] FlareSolverr sta risolvendo: ${url.split('?')[0]}`);
+        console.log(`[☁️] FlareSolverr in azione su: ${url.split('?')[0]}`);
         const response = await axios.post(`${FLARESOLVERR_URL}/v1`, {
             cmd: 'request.get',
             url: url,
@@ -88,12 +88,14 @@ async function getVixStream(scId, episodeId = null) {
 }
 
 const builder = new addonBuilder({
-    id: 'org.meezie.sc.final',
-    version: '5.2.0',
+    id: 'org.meezie.sc.gladiator',
+    version: '5.2.1',
     name: 'Meezie SC Gladiator',
+    description: 'StreamingCommunity con Bypass Cloudflare',
     resources: ['stream'],
     types: ['movie', 'series'],
-    idPrefixes: ['tt']
+    idPrefixes: ['tt'],
+    catalogs: [] // Obbligatorio per non far crashare il linter
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
@@ -133,7 +135,6 @@ builder.defineStreamHandler(async ({ type, id }) => {
 const PORT = process.env.PORT || 10000;
 serveHTTP(builder.getInterface(), { port: PORT });
 
-// Aggiorna dominio all'avvio
 (async () => {
     try {
         const { data } = await axios.get(LISTA_URL);
