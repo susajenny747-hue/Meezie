@@ -1,0 +1,56 @@
+const { addonBuilder } = require("stremio-addon-sdk");
+const express = require("express");
+const axios = require("axios");
+
+const app = express();
+
+const manifest = {
+    id: "org.vixhybrid.italy",
+    version: "1.0.0",
+    name: "Vix Hybrid 🤌",
+    description: "Film & Serie da VixCloud e sorgenti ITA",
+    resources: ["stream"],
+    types: ["movie", "series"],
+    idPrefixes: ["tt"]
+};
+
+const builder = new addonBuilder(manifest);
+
+// Logica per trovare i link (ispirata a VixFlix)
+builder.defineStreamHandler(async (args) => {
+    const { id } = args; // Esempio: tt1234567
+    
+    // Configurazione sorgenti
+    const VIX_API = "https://vixcloud.co/api/source/"; // Sorgente VixFlix
+    
+    try {
+        // Qui l'addon cerca il video usando l'ID IMDb
+        // In una versione full, qui aggiungeresti lo scraping di StreamingCommunity
+        const streamUrl = `${VIX_API}${id}`; 
+
+        return {
+            streams: [
+                {
+                    title: "VIX CLOUD 1080p 🤌",
+                    description: "Server Alta Qualità - Proxy Attivo",
+                    // Usiamo un finto proxy o link diretto pulito
+                    url: streamUrl 
+                }
+            ]
+        };
+    } catch (e) {
+        return { streams: [] };
+    }
+});
+
+// Avvio del server compatibile con Render
+const addonInterface = builder.getInterface();
+app.use("/", (req, res) => {
+    if (req.url === "/") return res.redirect("/manifest.json");
+    addonInterface(req, res);
+});
+
+const port = process.env.PORT || 7000;
+app.listen(port, () => {
+    console.log(`Addon online su porta: ${port}`);
+});
