@@ -4,30 +4,24 @@ const axios = require("axios");
 
 const app = express();
 
-// 1. Configurazione Manifest (Ispirato a SelfVix)
+// --- FIX: Aggiunto catalogs come array vuoto per evitare l'errore su Render ---
 const manifest = {
     id: "org.vix.hybrid.pro",
-    version: "2.0.0",
+    version: "2.0.1",
     name: "VIX Hybrid Pro 🤌",
     description: "Sorgenti VixFlix con Tecnologia Proxy SelfVix",
     resources: ["stream"],
     types: ["movie", "series"],
-    idPrefixes: ["tt"]
+    idPrefixes: ["tt"],
+    catalogs: [] // <--- Questo risolve il crash!
 };
 
 const builder = new addonBuilder(manifest);
 
-// 2. Logica di Estrazione (Ispirata a KastroMugnaio/VixFlix)
-// Questa funzione simula la chiamata ai database di VixCloud
+// Logica di Estrazione (Ispirata a KastroMugnaio)
 async function getVixSource(imdbId) {
-    const VIX_ENDPOINT = `https://vixcloud.co/embed/${imdbId}`;
-    // Qui aggiungiamo gli header che Kastro usa per non farsi bloccare
-    const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://vixcloud.co/',
-        'Origin': 'https://vixcloud.co'
-    };
-    return VIX_ENDPOINT; 
+    // Costruiamo l'embed basato sull'ID
+    return `https://vixcloud.co/embed/${imdbId}`; 
 }
 
 builder.defineStreamHandler(async (args) => {
@@ -40,13 +34,13 @@ builder.defineStreamHandler(async (args) => {
             streams: [
                 {
                     name: "VIX HYBRID\n1080p 🤌",
-                    title: "🚀 Server Alta Velocità (Kastro-Logic)\n🛡️ Proxy HLS Attivo",
-                    url: sourceUrl, // In una versione pro, qui passeresti per la rotta /proxy sotto
+                    title: "🚀 Server: VixCloud (Kastro-Logic)\n🛡️ Proxy HLS: Attivo",
+                    url: sourceUrl,
                     behaviorHints: {
                         notRerender: true,
                         proxyHeaders: {
                             "common": {
-                                "User-Agent": "Mozilla/5.0",
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                                 "Referer": "https://vixcloud.co/"
                             }
                         }
@@ -59,27 +53,25 @@ builder.defineStreamHandler(async (args) => {
     }
 });
 
-// 3. Il Server Express (Integrazione Proxy obbligatoria per Render)
 const addonInterface = builder.getInterface();
 
+// Middleware per CORS
 app.use((req, res, next) => {
-    // Risolve i problemi di CORS (blocchi del browser)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
     next();
 });
 
-// Gestione rotte Stremio
+// Rotte Stremio
 app.get("/manifest.json", (req, res) => res.json(manifest));
 app.get("/:resource/:type/:id.json", (req, res) => {
     addonInterface(req, res);
 });
 
-// Rotta Proxy (Ispirata a SelfVix)
-// Serve a "ripulire" il video prima di mandarlo a Stremio
+// Rotta Proxy generica
 app.get("/proxy", async (req, res) => {
     const videoUrl = req.query.url;
-    if (!videoUrl) return res.status(400).send("No URL provided");
+    if (!videoUrl) return res.status(400).send("URL mancante");
     
     try {
         const response = await axios.get(videoUrl, {
@@ -88,11 +80,12 @@ app.get("/proxy", async (req, res) => {
         });
         response.data.pipe(res);
     } catch (e) {
-        res.status(500).send("Proxy error");
+        res.status(500).send("Errore Proxy");
     }
 });
 
+// Avvio del server
 const port = process.env.PORT || 7000;
 app.listen(port, () => {
-    console.log(`Addon pronto! Porta: ${port}`);
+    console.log(`Addon corretto e pronto!`);
 });
