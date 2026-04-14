@@ -1,13 +1,14 @@
 {
-  "name": "vix-hybrid-addon",
-  "version": "1.0.0",
-  "description": "Stremio addon basato su SelfVix e VixFlix",
+  "name": "vix-hybrid-pro",
+  "version": "2.0.0",
+  "description": "Fusion VixFlix + SelfVix - Proxy HLS Integrato",
   "main": "server.js",
   "dependencies": {
     "stremio-addon-sdk": "^1.6.0",
+    "express": "^4.18.2",
     "axios": "^1.6.0",
-    "express": "^4.18.0",
-    "cheerio": "^1.0.0-rc.12"
+    "cheerio": "^1.0.0-rc.12",
+    "m3u8-parser": "^7.1.0"
   },
   "scripts": {
     "start": "node server.js"
