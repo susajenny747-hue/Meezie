@@ -1,10 +1,10 @@
-const { addonBuilder } = require("stremio-addon-sdk");
+const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 const express = require("express");
 const axios = require("axios");
 
 const app = express();
 
-// --- FIX: Aggiunto catalogs come array vuoto per evitare l'errore su Render ---
+// 1. Configurazione Manifest
 const manifest = {
     id: "org.vix.hybrid.pro",
     version: "2.0.1",
@@ -12,29 +12,26 @@ const manifest = {
     description: "Sorgenti VixFlix con Tecnologia Proxy SelfVix",
     resources: ["stream"],
     types: ["movie", "series"],
-    idPrefixes: ["tt"],
-    catalogs: [] // <--- Questo risolve il crash!
+    idPrefixes: ["tt"]
 };
 
 const builder = new addonBuilder(manifest);
 
-// Logica di Estrazione (Ispirata a KastroMugnaio)
+// 2. Logica di Estrazione
 async function getVixSource(imdbId) {
-    // Costruiamo l'embed basato sull'ID
+    // Simulazione link Vix
     return `https://vixcloud.co/embed/${imdbId}`; 
 }
 
 builder.defineStreamHandler(async (args) => {
     const { id } = args;
-
     try {
         const sourceUrl = await getVixSource(id);
-        
         return {
             streams: [
                 {
                     name: "VIX HYBRID\n1080p 🤌",
-                    title: "🚀 Server: VixCloud (Kastro-Logic)\n🛡️ Proxy HLS: Attivo",
+                    title: "🚀 Server: VixCloud\n🛡️ Proxy HLS Attivo",
                     url: sourceUrl,
                     behaviorHints: {
                         notRerender: true,
@@ -53,26 +50,17 @@ builder.defineStreamHandler(async (args) => {
     }
 });
 
+// --- FIX ERRORE: Gestione corretta dell'interfaccia ---
 const addonInterface = builder.getInterface();
+const router = getRouter(addonInterface);
 
-// Middleware per CORS
-app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    next();
-});
+// Usiamo il router ufficiale di Stremio su Express
+app.use(router);
 
-// Rotte Stremio
-app.get("/manifest.json", (req, res) => res.json(manifest));
-app.get("/:resource/:type/:id.json", (req, res) => {
-    addonInterface(req, res);
-});
-
-// Rotta Proxy generica
+// Rotta Proxy opzionale (se vuoi far passare il video dal tuo server)
 app.get("/proxy", async (req, res) => {
     const videoUrl = req.query.url;
-    if (!videoUrl) return res.status(400).send("URL mancante");
-    
+    if (!videoUrl) return res.status(400).send("No URL provided");
     try {
         const response = await axios.get(videoUrl, {
             responseType: 'stream',
@@ -80,12 +68,13 @@ app.get("/proxy", async (req, res) => {
         });
         response.data.pipe(res);
     } catch (e) {
-        res.status(500).send("Errore Proxy");
+        res.status(500).send("Proxy error");
     }
 });
 
-// Avvio del server
+// Porta per Render
 const port = process.env.PORT || 7000;
 app.listen(port, () => {
-    console.log(`Addon corretto e pronto!`);
+    console.log(`Addon corretto e pronto su porta: ${port}`);
+    console.log(`Installa su Stremio: https://meezie.onrender.com/manifest.json`);
 });
